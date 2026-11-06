@@ -1,121 +1,49 @@
-from datetime import date
-from typing import List, Optional
+"""PrepTrack API application factory and router wiring.
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
-from sqlalchemy.orm import Session
+Schema creation is intentionally absent: Alembic owns migrations
+(``alembic upgrade head``). See README.md for the deployment workflow.
+"""
 
-from .database import Base, ProblemDB, SessionLocal, engine
-from .models import (
-    Difficulty,
-    ProblemCreate,
-    ProblemResponse,
-    ProblemStatus,
-    StatsResponse,
-    UpdateNotesRequest,
-    UpdateStatusRequest,
+from __future__ import annotations
+
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+
+from crud import ConflictError
+from routers import auth, problems
+
+app = FastAPI(
+    title="PrepTrack API",
+    version="2.0.0",
+    description=(
+        "Multi-tenant REST API for tracking interview-preparation problems.\n\n"
+        "Authenticate via `POST /auth/login` (OAuth2 password flow) and send the "
+        "returned JWT as `Authorization: Bearer <token>`.\n\n"
+        "Every problem endpoint is scoped to the authenticated user."
+    ),
 )
 
-Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="PrepTrack API")
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-@app.get("/")
-def root():
-    return {"message": "PrepTrack API is running with SQLite"}
-
-
-@app.post("/problems", response_model=ProblemResponse, status_code=status.HTTP_201_CREATED)
-def create_problem(payload: ProblemCreate, db: Session = Depends(get_db)):
-    item = ProblemDB(
-        title=payload.title,
-        difficulty=payload.difficulty.value,
-        topic=payload.topic,
-        status=ProblemStatus.pending.value,
-        notes=payload.notes,
-        last_solved_date=payload.last_solved_date,
-        revision_reminder=payload.revision_reminder,
+@app.exception_handler(ConflictError)
+async def conflict_exception_handler(request: Request, exc: ConflictError) -> JSONResponse:
+    """Translate unique-constraint violations raised in the data layer into 409."""
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": str(exc)},
     )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return item
 
 
-@app.get("/problems", response_model=List[ProblemResponse])
-def get_problems(
-    difficulty: Optional[Difficulty] = Query(default=None),
-    topic: Optional[str] = Query(default=None),
-    db: Session = Depends(get_db),
-):
-    query = db.query(ProblemDB)
-    if difficulty is not None:
-        query = query.filter(ProblemDB.difficulty == difficulty.value)
-    if topic is not None:
-        query = query.filter(ProblemDB.topic.ilike(topic))
-    return query.order_by(ProblemDB.id.asc()).all()
+app.include_router(auth.router)
+app.include_router(problems.router)
+app.include_router(problems.stats_router)
 
 
-@app.put("/problems/{problem_id}/status", response_model=ProblemResponse)
-def update_problem_status(
-    problem_id: int,
-    payload: UpdateStatusRequest,
-    db: Session = Depends(get_db),
-):
-    item = db.query(ProblemDB).filter(ProblemDB.id == problem_id).first()
-    if item is None:
-        raise HTTPException(status_code=404, detail="Problem not found")
-
-    item.status = payload.status.value
-    if payload.status == ProblemStatus.solved:
-        item.last_solved_date = date.today()
-
-    db.commit()
-    db.refresh(item)
-    return item
+@app.get("/", tags=["Health"], summary="Service banner")
+def root() -> dict[str, str]:
+    return {"service": "PrepTrack API", "version": app.version, "docs": "/docs"}
 
 
-@app.put("/problems/{problem_id}/notes", response_model=ProblemResponse)
-def add_notes(problem_id: int, payload: UpdateNotesRequest, db: Session = Depends(get_db)):
-    item = db.query(ProblemDB).filter(ProblemDB.id == problem_id).first()
-    if item is None:
-        raise HTTPException(status_code=404, detail="Problem not found")
-
-    item.notes = payload.notes
-    db.commit()
-    db.refresh(item)
-    return item
-
-
-@app.delete("/problems/{problem_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_problem(problem_id: int, db: Session = Depends(get_db)):
-    item = db.query(ProblemDB).filter(ProblemDB.id == problem_id).first()
-    if item is None:
-        raise HTTPException(status_code=404, detail="Problem not found")
-
-    db.delete(item)
-    db.commit()
-    return
-
-
-@app.get("/stats", response_model=StatsResponse)
-def get_stats(db: Session = Depends(get_db)):
-    all_items = db.query(ProblemDB).all()
-    solved_count = sum(1 for p in all_items if p.status == ProblemStatus.solved.value)
-    pending_count = sum(1 for p in all_items if p.status == ProblemStatus.pending.value)
-    revision_count = sum(1 for p in all_items if p.status == ProblemStatus.revision.value)
-
-    return StatsResponse(
-        total_problems=len(all_items),
-        solved_count=solved_count,
-        pending_count=pending_count,
-        revision_count=revision_count,
-    )
+@app.get("/health", tags=["Health"], summary="Liveness probe for Render")
+def health() -> dict[str, str]:
+    """Cheap, dependency-free probe used by Render's health check."""
+    return {"status": "ok"}

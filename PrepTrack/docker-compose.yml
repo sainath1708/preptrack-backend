@@ -1,0 +1,46 @@
+# Local containerised development: FastAPI + PostgreSQL.
+#
+#   docker compose up --build
+#   docker compose exec api alembic upgrade head
+#   docker compose exec api python seed.py
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: preptrack-db
+    environment:
+      POSTGRES_USER: preptrack
+      POSTGRES_PASSWORD: preptrack
+      POSTGRES_DB: preptrack
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U preptrack -d preptrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: preptrack-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      SECRET_KEY: local-dev-only-change-me
+      ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      DATABASE_URL: postgresql://preptrack:preptrack@db:5432/preptrack
+    ports:
+      - "8000:8000"
+    # Dev overrides: reload + bind-mounted source. Migrations still run first.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes:
+      - .:/app
+
+volumes:
+  pgdata:
